@@ -12,6 +12,8 @@ module neuron_processor #(
 
     input logic          weights_valid,
     input logic          inputs_valid,
+
+    output logic         rd_en,
     output logic         out_valid,
     output logic         out
 
@@ -37,6 +39,7 @@ module neuron_processor #(
     // output registers
     logic out_r;
     logic out_valid_r;
+    logic rd_en_r;
 
     always_ff @(posedge(clk) or posedge(rst)) begin
         if (rst) begin
@@ -55,6 +58,7 @@ module neuron_processor #(
         // default values for output flipflops
         out_r <= 1'b0;
         out_valid_r <= 1'b0;
+        rd_en_r <= 1'b0;
         // default values for counters
         next_state <= state_r;
         next_count <= count_r;
@@ -63,6 +67,7 @@ module neuron_processor #(
         case (state_r)
 
             WAIT_FOR_DATA: begin
+                rd_en_r <= 1'b1;
                 // wait for inputs and weights to be valid, 
                 // will be asserted by whatever is retrieving them from memory
                 if (inputs_valid && weights_valid) begin
@@ -106,6 +111,7 @@ module neuron_processor #(
 
         assign out = out_r;
         assign out_valid = out_valid_r;
+        assign rd_en = rd_en_r;
     end
 
 

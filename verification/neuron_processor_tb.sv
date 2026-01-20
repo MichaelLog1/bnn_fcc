@@ -17,6 +17,7 @@ module neuron_processor_tb;
     logic inputs_valid;
     logic weights_valid;
 
+    logic rd_en;
     logic out;
 
     neuron_processor #(
@@ -33,6 +34,7 @@ module neuron_processor_tb;
 
         .inputs_valid (inputs_valid),
         .weights_valid(weights_valid),
+        .rd_en(rd_en),
         .out_valid(out_valid),
         .out(out)
     );
@@ -42,7 +44,7 @@ module neuron_processor_tb;
         input logic [PARALLEL_INPUTS-1:0] a,
         input logic [PARALLEL_INPUTS-1:0] b
     );
-        popcount_xnor = $countones(a ~^ b);
+        popcount_xnor = current_count + $countones(a ~^ b);
     endfunction
     
     initial begin : generate_clock
@@ -65,28 +67,16 @@ module neuron_processor_tb;
         rst <= 1'b0;
         repeat (5) @(posedge clk);
 
-        @(posedge clk);
+        @(posedge clk iff rd_en);
         inputs_valid  <= 1'b1;
         weights_valid <= 1'b1;
         inputs        <= 1'b1;
         weights       <= 1'b1;
 
-        @(posedge clk);
+        @(posedge clk iff rd_en);
         inputs_valid  <= 1'b1;
         weights_valid <= 1'b1;
         inputs        <= 1'b0;
-        weights       <= 1'b1;
-
-        @(posedge clk);
-        inputs_valid  <= 1'b0;
-        weights_valid <= 1'b1;
-        inputs        <= 1'b0;
-        weights       <= 1'b1;
-
-        @(posedge clk);
-        inputs_valid  <= 1'b1;
-        weights_valid <= 1'b1;
-        inputs        <= 1'b1;
         weights       <= 1'b1;
         
         @(posedge clk iff out_valid);
@@ -100,28 +90,25 @@ module neuron_processor_tb;
         forever begin
             @(posedge clk);
 
-            if (inputs_valid && weights_valid) begin
+            if (inputs_valid && weights_valid && rd_en) begin
                 expected = popcount_xnor(expected, inputs, weights);
 
                 $display("[%0t] XNOR=%b popcount=%0d",
                         $time, inputs ~^ weights, expected);
 
-                // Example assertion (optional)
-                // assert (expected == DUT.population_count)
-                //   else $error("Mismatch!");
             end
             if (out_valid) begin
                 if (expected >= threshold) begin
                     assert (out === 1'b1)
-                        else $error("[%0t] ERROR: expected >= threshold (%0d > %0d) but out=%b",
+                        else $error("[%0t] ERROR: popcount >= threshold (%0d > %0d) but out=%b",
                                     $time, expected, threshold, out);
                 end else begin
                     assert (out === 1'b0)
-                        else $error("[%0t] ERROR: expected < threshold (%0d <= %0d) but out=%b",
+                        else $error("[%0t] ERROR: popcount < threshold (%0d <= %0d) but out=%b",
                                     $time, expected, threshold, out);
                 end
 
-                $display("[%0t] expected=%0d threshold=%0d out=%b",
+                $display("[%0t] popcount=%0d threshold=%0d out=%b",
                         $time, expected, threshold, out);
             end
         end
