@@ -4,8 +4,8 @@ module neuron_processor_tb;
 
     localparam bit PARALLELIZE_LAYERS = 1'b0;
     localparam int PARALLEL_NEURONS = 1;
-    localparam int PARALLEL_INPUTS = 1;
-    localparam int NUM_INPUTS = 2;
+    localparam int PARALLEL_INPUTS = 4;
+    localparam int NUM_INPUTS = 10;
 
     logic clk = 1'b0;
     logic rst;
@@ -15,37 +15,33 @@ module neuron_processor_tb;
     logic [               31:0] threshold;
 
     logic valid_in;
-    logic eof;
-
     logic valid_out;
-    logic out;
-    logic popcount;
 
-    neuron_processor2 #(
-        .PARALLEL_INPUTS (PARALLEL_INPUTS)
+    logic out;
+
+    neuron_processor #(
+        .PARALLEL_INPUTS (PARALLEL_INPUTS),
+        .PARALLEL_NEURONS(PARALLEL_NEURONS),
+        .NUM_INPUTS(NUM_INPUTS)
     ) DUT (
         .clk(clk),
         .rst(rst),
 
-        .x    (inputs),
-        .w   (weights),
+        .inputs    (inputs),
+        .weights   (weights),
         .threshold(threshold),
-
         .valid_in(valid_in),
-        .eof(eof),
-
         .valid_out(valid_out),
-        .out(out),
-        .popcount(popcount)
+        .out(out)
     );
 
-    function automatic int popcount_xnor(
-        int current_count,
-        input logic [PARALLEL_INPUTS-1:0] a,
-        input logic [PARALLEL_INPUTS-1:0] b
-    );
-        popcount_xnor = current_count + $countones(a ~^ b);
-    endfunction
+    // function automatic int popcount_xnor(
+    //     int current_count,
+    //     input logic [PARALLEL_INPUTS-1:0] a,
+    //     input logic [PARALLEL_INPUTS-1:0] b
+    // );
+    //     popcount_xnor = current_count + $countones(a ~^ b);
+    // endfunction
     
     initial begin : generate_clock
         forever #5 clk <= ~clk;
@@ -58,7 +54,7 @@ module neuron_processor_tb;
         inputs        <= '0;
         weights       <= '0;
         valid_in  <= 1'b0;
-        threshold     <= 32'b0;
+        threshold     <= 32'b10;
 
 
         repeat (5) @(posedge clk);
@@ -68,22 +64,32 @@ module neuron_processor_tb;
 
         @(posedge clk);
         valid_in  <= 1'b1;
-        inputs        <= 1'b1;
-        weights       <= 1'b1;
+        inputs        <= 4'b0011;
+        weights       <= 4'b1010;
+        // should be 2
+
+        @(posedge clk)
+        valid_in <= 1'b0;
+        inputs        <= 4'b1111;
+        weights       <= 4'b1000;
+        //should be 0
 
         @(posedge clk);
         valid_in  <= 1'b1;
-        inputs        <= 1'b0;
-        weights       <= 1'b1;
+        inputs        <= 4'b0111;
+        weights       <= 4'b1100;
+        //should be 1
 
         @(posedge clk);
-        eof         <= 1'b1;
         valid_in  <= 1'b1;
-        inputs        <= 1'b0;
-        weights       <= 1'b0;
-
-        repeat (2) @(posedge clk);
-        
+        inputs        <= 4'b1111;
+        weights       <= 4'b0000;
+        //should be 0
+        @(posedge clk);
+        valid_in  <= 1'b0;
+        repeat (80) @(posedge clk);
+       
+        valid_in <= 1'b0;
         disable generate_clock;
         $display("Tests completed.");
     end
