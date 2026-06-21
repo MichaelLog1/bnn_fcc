@@ -1,118 +1,96 @@
+// MODULE: neuron_processor
+//
+// DESCRIPTION:
+// Computes a single BNN neuron activation. A neuron's output is determined by the
+// population count (popcount) of the bitwise XNOR between its input bits and weight
+// bits, compared against a threshold:
+//
+//     activation = (popcount(inputs XNOR weights) >= threshold)
+//
+// Inputs and weights are consumed PARALLEL_INPUTS bits at a time over
+// CHUNKS = ceil(NUM_INPUTS / PARALLEL_INPUTS) accepted beats. The popcount of each
+// beat is computed in a single cycle with $countones and accumulated. After the last
+// beat, the result is registered for one cycle on out/out_valid, and the raw
+// accumulated popcount is exposed on the popcount port (used by the output layer for
+// argmax, where the threshold comparison is irrelevant).
+//
+// HANDSHAKE:
+// A beat is accepted whenever (in_valid && in_ready). in_ready is always asserted:
+// the processor can absorb one beat per cycle and never needs to stall its producer.
+// Gaps are allowed; cycles without in_valid are simply ignored. The first beat after
+// reset (or after a result is produced) is treated as chunk 0 of the next neuron, so
+// neurons can be streamed back-to-back with no bubble.
+//
+// PADDING:
+// The processor counts all PARALLEL_INPUTS bits of every beat, including any padding
+// on the final (partial) chunk. BNN padding is neutral by construction: inputs are
+// padded with 0s and weights with 1s, and XNOR(0,1) = 0 contributes nothing to the
+// popcount. The producer is responsible for supplying that padding.
+
 module neuron_processor #(
-    parameter int PARALLEL_INPUTS  = 1,
-    parameter int PARALLEL_NEURONS = 1,
-    parameter int NUM_INPUTS       = 2   // number of nodes in previous layer  
+    parameter  int PARALLEL_INPUTS = 8,
+    parameter  int NUM_INPUTS      = 784,  // fan-in (nodes in previous layer)
+    // Max popcount equals the number of bits actually accumulated, which rounds the
+    // fan-in up to a whole number of PARALLEL_INPUTS-wide chunks (the final chunk's
+    // neutral padding bits are still counted). Size the result to that worst case.
+    localparam int POPCOUNT_WIDTH  =
+        $clog2(((NUM_INPUTS + PARALLEL_INPUTS - 1) / PARALLEL_INPUTS) * PARALLEL_INPUTS + 1)
 ) (
     input logic clk,
-    input logic rst,
+    input logic rst,  // synchronous, active high
 
-    input logic [PARALLEL_INPUTS-1:0] inputs,
-    input logic [PARALLEL_INPUTS-1:0] weights,
-    input logic [               31:0] threshold,
+    // Input chunk stream (inputs/weights valid when in_valid is asserted)
+    input  logic [PARALLEL_INPUTS-1:0] inputs,
+    input  logic [PARALLEL_INPUTS-1:0] weights,
+    input  logic [               31:0] threshold,
+    input  logic                       in_valid,
+    output logic                       in_ready,
 
-    input logic          weights_valid,
-    input logic          inputs_valid,
-
-    output logic         rd_en,
-    output logic         out_valid,
-    output logic         out
-
+    // Result (asserted for one cycle after the final chunk is accepted)
+    output logic                      out_valid,
+    output logic                      out,       // thresholded activation
+    output logic [POPCOUNT_WIDTH-1:0] popcount   // raw popcount (for output-layer argmax)
 );
 
-    typedef enum logic [1:0] {
-        WAIT_FOR_DATA,
-        WHILE,
-        FINISH
-    } state_t;
-    state_t state_r, next_state;
+    localparam int CHUNKS      = (NUM_INPUTS + PARALLEL_INPUTS - 1) / PARALLEL_INPUTS;
+    localparam int CHUNK_CNT_W = $clog2(CHUNKS + 1);
 
-    // population counter
-    int count_r;
-    int next_count;
+    // Population count accumulator and beat (chunk) counter.
+    logic [POPCOUNT_WIDTH-1:0] count_r;
+    logic [   CHUNK_CNT_W-1:0] beat_r;
 
-    // keeps track of how many iterations of the NP we need to cover all neuron inputs
-    int iterations_r;
-    int next_iterations;
+    // Popcount of the current beat and the running accumulation including it.
+    logic [POPCOUNT_WIDTH-1:0] chunk_pop;
+    logic [POPCOUNT_WIDTH-1:0] acc;
 
-    logic [PARALLEL_INPUTS-1:0] xnor_r;
+    assign in_ready  = 1'b1;
+    assign chunk_pop = POPCOUNT_WIDTH'($countones(inputs ~^ weights));
+    assign acc       = count_r + chunk_pop;
 
-    // output registers
-    logic out_r;
-    logic out_valid_r;
-    logic rd_en_r;
-
-    always_ff @(posedge(clk) or posedge(rst)) begin
+    always_ff @(posedge clk) begin
         if (rst) begin
-            state_r <= WAIT_FOR_DATA;
-            count_r <= 0;
-            iterations_r <= ((NUM_INPUTS + PARALLEL_INPUTS - 1) / PARALLEL_INPUTS);
-        end
-        else begin
-            state_r <= next_state;
-            count_r <= next_count;
-            iterations_r <= next_iterations;
+            count_r   <= '0;
+            beat_r    <= '0;
+            out_valid <= 1'b0;
+            out       <= 1'b0;
+            popcount  <= '0;
+        end else begin
+            out_valid <= 1'b0;  // default: single-cycle pulse
+
+            if (in_valid && in_ready) begin
+                if (beat_r == CHUNK_CNT_W'(CHUNKS - 1)) begin
+                    // Final chunk of this neuron: emit result, rearm for the next.
+                    out_valid <= 1'b1;
+                    out       <= (acc >= threshold);
+                    popcount  <= acc;
+                    count_r   <= '0;
+                    beat_r    <= '0;
+                end else begin
+                    count_r <= acc;
+                    beat_r  <= beat_r + 1'b1;
+                end
+            end
         end
     end
-
-    always_comb begin
-        // default values for output flipflops
-        out_r <= 1'b0;
-        out_valid_r <= 1'b0;
-        rd_en_r <= 1'b0;
-        // default values for counters
-        next_state <= state_r;
-        next_count <= count_r;
-        next_iterations <= iterations_r;
-
-        case (state_r)
-
-            WAIT_FOR_DATA: begin
-                rd_en_r <= 1'b1;
-                // wait for inputs and weights to be valid, 
-                // will be asserted by whatever is retrieving them from memory
-                if (inputs_valid && weights_valid) begin
-                    next_state <= WHILE;
-                    xnor_r <= (inputs ~^ weights);
-                    next_iterations <= iterations_r - 1;
-                end
-            end
-
-            WHILE: begin
-                if (xnor_r == '0) begin
-                    // we're done with this iteration
-                    next_state <= FINISH;
-                end else if (xnor_r[0]) begin // check lowest bit
-                    next_count <= count_r + 1; // increment count if the value is one
-                end
-                xnor_r <= xnor_r >> 1; // shift right to examine next bit
-            end
-
-            FINISH: begin
-                // go back to start and wait for valid signals to be asserted to start again
-                next_state <= WAIT_FOR_DATA;
-
-                // no iterations left to cover all neuron inputs
-                if (iterations_r <= 0) begin
-                    // we're done! Reset count to 0 and iterations to defauly value
-                    next_count <= '0;
-                    next_iterations <= ((NUM_INPUTS + PARALLEL_INPUTS - 1) / PARALLEL_INPUTS);
-                    
-                    // assert out_valid for one cycle
-                    if (count_r >= threshold) begin
-                        out_r <= 1'b1;
-                        out_valid_r <= 1'b1;
-                    end else begin
-                        out_r <= 1'b0;
-                        out_valid_r <= 1'b1;
-                    end
-                end
-            end
-        endcase
-
-        assign out = out_r;
-        assign out_valid = out_valid_r;
-        assign rd_en = rd_en_r;
-    end
-
 
 endmodule
